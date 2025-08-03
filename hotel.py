@@ -10,7 +10,8 @@ if not firebase_admin._apps:
     cred = credentials.Certificate(firebase_config)
 
     firebase_admin.initialize_app(cred, {
-        'databaseURL': f"https://{firebase_config['project_id']}.firebaseio.com",
+        #'databaseURL': f"https://{firebase_config['project_id']}.firebaseio.com",
+        'databaseURL': f"https://hotel-901b3-default-rtdb.firebaseio.com/",
         'storageBucket': f"{firebase_config['project_id']}.appspot.com"
     })
 
@@ -132,3 +133,4 @@ else:
                                 "created_at": datetime.now().isoformat()
                             }).key
                             st.success(f"Order {order_id} placed! Waiting for confirmation.")
+
