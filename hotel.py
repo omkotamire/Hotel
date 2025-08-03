@@ -1,18 +1,19 @@
 import streamlit as st
 import firebase_admin
-from firebase_admin import credentials, firestore, storage, auth
+from firebase_admin import credentials, db, storage, auth
 from datetime import datetime
 import uuid
 
 # -------------------- Firebase Init --------------------
 if not firebase_admin._apps:
-    firebase_config = dict(st.secrets["firebase"])  # ✅ Convert to dict
+    firebase_config = dict(st.secrets["firebase"])
     cred = credentials.Certificate(firebase_config)
+
     firebase_admin.initialize_app(cred, {
+        'databaseURL': f"https://{firebase_config['project_id']}.firebaseio.com",
         'storageBucket': f"{firebase_config['project_id']}.appspot.com"
     })
 
-db = firestore.client()
 bucket = storage.bucket()
 
 # -------------------- Role Selection --------------------
@@ -32,29 +33,28 @@ if role == "Admin":
         if submitted:
             # Create Hotel Owner Authentication
             user = auth.create_user(email=owner_email, password=owner_password)
-            
-            # Store hotel details
-            db.collection("hotels").document(user.uid).set({
+
+            # Store hotel details in Realtime DB
+            ref = db.reference("hotels")
+            ref.child(user.uid).set({
                 "name": hotel_name,
                 "description": description,
-                "created_at": datetime.now()
+                "created_at": datetime.now().isoformat()
             })
             st.success(f"Hotel '{hotel_name}' added successfully!")
 
     # View Orders Statistics
     st.subheader("Orders Statistics")
-    orders = db.collection("orders").stream()
-    for order in orders:
-        data = order.to_dict()
-        st.write(data)
+    orders_ref = db.reference("orders").get()
+    if orders_ref:
+        for order_id, data in orders_ref.items():
+            st.write(f"Order ID: {order_id}", data)
 
 # -------------------- Hotel Owner Panel --------------------
 elif role == "Hotel Owner":
     st.title("Hotel Owner Dashboard")
 
-    owner_email = st.text_input("Email")
     owner_id = st.text_input("Owner UID (from admin)")
-    
     menu_tab, order_tab = st.tabs(["Add Menu", "Manage Orders"])
 
     with menu_tab:
@@ -65,26 +65,29 @@ elif role == "Hotel Owner":
             add_menu = st.form_submit_button("Add Menu")
 
             if add_menu:
-                blob = bucket.blob(f"menu/{uuid.uuid4()}.jpg")
-                blob.upload_from_file(image_file, content_type=image_file.type)
-                img_url = blob.public_url
+                if not owner_id:
+                    st.error("Please enter your Owner UID")
+                else:
+                    blob = bucket.blob(f"menu/{uuid.uuid4()}.jpg")
+                    blob.upload_from_file(image_file, content_type=image_file.type)
+                    img_url = blob.public_url
 
-                db.collection("hotels").document(owner_id).collection("menu").add({
-                    "name": menu_name,
-                    "price": price,
-                    "image": img_url,
-                    "created_at": datetime.now()
-                })
-                st.success("Menu added successfully!")
+                    db.reference(f"hotels/{owner_id}/menu").push({
+                        "name": menu_name,
+                        "price": price,
+                        "image": img_url,
+                        "created_at": datetime.now().isoformat()
+                    })
+                    st.success("Menu added successfully!")
 
     with order_tab:
-        orders = db.collection("orders").where("hotel_id", "==", owner_id).stream()
-        for order in orders:
-            data = order.to_dict()
-            st.write(data)
-            if st.button(f"Confirm Order {order.id}"):
-                db.collection("orders").document(order.id).update({"status": "confirmed"})
-                st.success("Order Confirmed!")
+        orders = db.reference("orders").order_by_child("hotel_id").equal_to(owner_id).get()
+        if orders:
+            for order_id, data in orders.items():
+                st.write(data)
+                if st.button(f"Confirm Order {order_id}"):
+                    db.reference(f"orders/{order_id}/status").set("confirmed")
+                    st.success("Order Confirmed!")
 
 # -------------------- Customer Panel --------------------
 else:
@@ -99,32 +102,33 @@ else:
 
         if submit_reg:
             customer_id = str(uuid.uuid4())
-            db.collection("customers").document(customer_id).set({
+            db.reference(f"customers/{customer_id}").set({
                 "name": name,
                 "mobile": mobile,
                 "village": village,
                 "address": address,
-                "created_at": datetime.now()
+                "created_at": datetime.now().isoformat()
             })
             st.success("Registered successfully!")
 
     st.subheader("Browse Hotels")
-    hotels = db.collection("hotels").stream()
-    for hotel in hotels:
-        data = hotel.to_dict()
-        if st.button(f"View Menu - {data['name']}"):
-            menus = db.collection("hotels").document(hotel.id).collection("menu").stream()
-            for menu in menus:
-                m = menu.to_dict()
-                st.image(m["image"], width=100)
-                st.write(f"{m['name']} - ₹{m['price']}")
-                if st.button(f"Order {m['name']}"):
-                    db.collection("orders").add({
-                        "hotel_id": hotel.id,
-                        "customer_mobile": mobile,
-                        "item": m["name"],
-                        "price": m["price"],
-                        "status": "pending",
-                        "created_at": datetime.now()
-                    })
-                    st.success("Order placed! Waiting for confirmation.")
+    hotels = db.reference("hotels").get()
+    if hotels:
+        for hotel_id, data in hotels.items():
+            st.write(f"🏨 {data['name']} - {data['description']}")
+            if st.button(f"View Menu - {data['name']}", key=hotel_id):
+                menus = db.reference(f"hotels/{hotel_id}/menu").get()
+                if menus:
+                    for menu_id, m in menus.items():
+                        st.image(m["image"], width=100)
+                        st.write(f"{m['name']} - ₹{m['price']}")
+                        if st.button(f"Order {m['name']}", key=menu_id):
+                            order_id = db.reference("orders").push({
+                                "hotel_id": hotel_id,
+                                "customer_mobile": mobile,
+                                "item": m["name"],
+                                "price": m["price"],
+                                "status": "pending",
+                                "created_at": datetime.now().isoformat()
+                            }).key
+                            st.success(f"Order {order_id} placed! Waiting for confirmation.")
